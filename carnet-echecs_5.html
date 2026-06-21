@@ -1066,24 +1066,56 @@ const Engine = {
   },
 
   tryLoad(url) {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
+      // Firefox (and some other browsers) refuse to construct a Worker directly from a
+      // cross-origin URL ("Erreur de sécurité" / SecurityError), even when the remote
+      // server sends permissive CORS headers — this restriction applies to the Worker
+      // constructor itself, not just the fetch of its contents. The reliable workaround:
+      // fetch the script as text (a normal cross-origin fetch, which DOES respect CORS),
+      // wrap it in a same-origin Blob, and inject a Module.locateFile hook so Emscripten
+      // still finds its .wasm file back on the CDN instead of looking next to the blob.
+      const cdnDir = url.substring(0, url.lastIndexOf('/') + 1);
+
+      let scriptText;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) { resolve({ ok:false, reason:`${url} -> HTTP ${resp.status}` }); return; }
+        scriptText = await resp.text();
+      } catch (e) {
+        resolve({ ok:false, reason:`${url} -> fetch a échoué (${e.message||e})` });
+        return;
+      }
+
+      const prelude = `self.Module = self.Module || {}; self.Module.locateFile = function(path) { return ${JSON.stringify(cdnDir)} + path; };\n`;
+
+      let blobUrl;
+      try {
+        const blob = new Blob([prelude + scriptText], { type: 'application/javascript' });
+        blobUrl = URL.createObjectURL(blob);
+      } catch (e) {
+        resolve({ ok:false, reason:`${url} -> création du Blob impossible (${e.message||e})` });
+        return;
+      }
+
       let worker;
       try {
-        worker = new Worker(url);
+        worker = new Worker(blobUrl);
       } catch (err) {
-        resolve({ ok:false, reason: `${url} -> impossible de créer le Worker (${err.message||err})` });
+        URL.revokeObjectURL(blobUrl);
+        resolve({ ok:false, reason: `${url} -> impossible de créer le Worker même via Blob (${err.message||err})` });
         return;
       }
 
       let settled = false;
       const timeout = setTimeout(() => {
-        if (!settled) { settled = true; try{worker.terminate();}catch(e){}; resolve({ok:false, reason:`${url} -> délai dépassé sans réponse (8s)`}); }
+        if (!settled) { settled = true; try{worker.terminate();}catch(e){}; URL.revokeObjectURL(blobUrl); resolve({ok:false, reason:`${url} -> délai dépassé sans réponse (8s)`}); }
       }, 8000);
 
       worker.onerror = (errEvent) => {
         if (!settled) {
           settled = true; clearTimeout(timeout);
           try{worker.terminate();}catch(e){};
+          URL.revokeObjectURL(blobUrl);
           const msg = (errEvent && (errEvent.message || errEvent.type)) || 'erreur inconnue';
           resolve({ok:false, reason:`${url} -> erreur Worker: ${msg}`});
         }
@@ -1105,6 +1137,7 @@ const Engine = {
       } catch (err) {
         if (!settled) {
           settled = true; clearTimeout(timeout);
+          URL.revokeObjectURL(blobUrl);
           resolve({ok:false, reason:`${url} -> postMessage a échoué (${err.message||err})`});
         }
       }
