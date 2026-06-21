@@ -1086,7 +1086,40 @@ const Engine = {
         return;
       }
 
-      const prelude = `self.Module = self.Module || {}; self.Module.locateFile = function(path) { return ${JSON.stringify(cdnDir)} + path; };\n`;
+      // locateFile alone isn't reliable across every Stockfish build (some resolve their
+      // .wasm path through other means). As a robust fallback that works regardless of
+      // the internal mechanism, also patch fetch/XMLHttpRequest inside the worker so any
+      // request for a bare filename (not already an absolute URL) gets redirected to the
+      // same CDN directory the main script came from.
+      const prelude = `
+self.Module = self.Module || {};
+self.Module.locateFile = function(path) { return ${JSON.stringify(cdnDir)} + path; };
+(function() {
+  var cdnDir = ${JSON.stringify(cdnDir)};
+  function resolveUrl(u) {
+    if (typeof u === 'string' && !/^([a-z]+:)?\\/\\//i.test(u) && !u.startsWith('blob:') && !u.startsWith('data:')) {
+      return cdnDir + u;
+    }
+    return u;
+  }
+  var origFetch = self.fetch;
+  if (origFetch) {
+    self.fetch = function(input, init) {
+      if (typeof input === 'string') input = resolveUrl(input);
+      return origFetch.call(this, input, init);
+    };
+  }
+  var OrigXHR = self.XMLHttpRequest;
+  if (OrigXHR) {
+    var origOpen = OrigXHR.prototype.open;
+    OrigXHR.prototype.open = function(method, url) {
+      var args = Array.prototype.slice.call(arguments);
+      args[1] = resolveUrl(url);
+      return origOpen.apply(this, args);
+    };
+  }
+})();
+`;
 
       let blobUrl;
       try {
