@@ -398,6 +398,13 @@
     font-size: 14px;
   }
   .move-nav button:hover { border-color: var(--wood); }
+  .move-nav button.wide-btn {
+    width: auto;
+    padding: 0 14px;
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
   .move-counter { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-dim); display: flex; align-items: center; padding: 0 8px; }
 
   .moves-list {
@@ -468,6 +475,32 @@
   }
   .feedback-good { background: var(--success-dim); color: #E2F0D8; border: 1px solid var(--success); }
   .feedback-bad { background: var(--error-dim); color: #F5D8D4; border: 1px solid var(--error); }
+
+  /* Explorer module: master move rows */
+  .master-move-row {
+    display: grid;
+    grid-template-columns: 70px 1fr 50px;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    margin-bottom: 6px;
+    background: var(--bg-inset);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .master-move-row:hover { border-color: var(--wood); background: #1A1611; }
+  .master-move-row .mmr-san { font-family: var(--font-mono); font-weight: 700; font-size: 14px; }
+  .master-move-row .mmr-bar-track {
+    height: 18px; border-radius: 4px; overflow: hidden;
+    display: flex; background: var(--bg-inset);
+  }
+  .master-move-row .mmr-bar-white { background: #EEEED2; }
+  .master-move-row .mmr-bar-draw { background: #8A8178; }
+  .master-move-row .mmr-bar-black { background: #4A4438; }
+  .master-move-row .mmr-total { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dim); text-align: right; }
+  .explorer-empty { color: var(--text-dim); font-size: 13.5px; padding: 10px 0; }
   .feedback-box .feedback-title { font-weight: 700; margin-bottom: 6px; font-family: var(--font-display); font-size: 15px; }
 
   @media (max-width: 640px) {
@@ -493,6 +526,7 @@
       <button class="tab-btn active" data-view="add">Ajouter</button>
       <button class="tab-btn" data-view="journal">Journal</button>
       <button class="tab-btn" data-view="trainer">Entraîneur</button>
+      <button class="tab-btn" data-view="explorer">Explorer</button>
       <button class="tab-btn" data-view="stats">Statistiques</button>
       <button class="tab-btn" data-view="goals">Objectifs</button>
     </nav>
@@ -632,6 +666,35 @@
             </div>
           </div>
           <div id="trainerFeedback" style="margin-top:16px;"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- EXPLORER VIEW -->
+  <section class="view" id="view-explorer">
+    <div class="panel">
+      <h2 class="section-title">Explorateur de parties</h2>
+      <p class="section-sub">Joue des coups et découvre ce que jouent les grands maîtres dans la même position, avec l'avis du moteur à côté.</p>
+
+      <div class="game-detail-grid">
+        <div>
+          <div id="explorerBoardContainer"></div>
+          <div class="move-nav">
+            <button id="explorerUndoBtn" class="wide-btn">↶ Annuler le dernier coup</button>
+            <button id="explorerResetBtn" class="wide-btn">⟲ Recommencer</button>
+          </div>
+          <p style="text-align:center; margin-top:10px; font-size:12.5px; color:var(--text-dim);" id="explorerTurnLabel"></p>
+          <div class="moves-list" id="explorerMovesPlayed" style="text-align:center; margin-top:8px;"></div>
+        </div>
+        <div>
+          <div id="explorerEngineBox" class="notes-box" style="margin-top:0; margin-bottom:16px;">
+            <strong>Avis du moteur</strong><br>
+            <span id="explorerEngineText" style="color:var(--text-dim);">Chargement…</span>
+          </div>
+
+          <label class="field-label">Coups joués par les grands maîtres dans cette position</label>
+          <div id="explorerMastersList" style="margin-top:10px;"></div>
         </div>
       </div>
     </div>
@@ -1221,6 +1284,10 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
       populateTrainerThemeFilter();
       renderTrainerGameList();
       if (!Engine.ready && !Engine.loadingPromise) Engine.load();
+    }
+    if (btn.dataset.view === 'explorer') {
+      if (!Engine.ready && !Engine.loadingPromise) Engine.load();
+      refreshExplorerPanels();
     }
   });
 });
@@ -2102,10 +2169,289 @@ function sanToUci(state, san) {
   return null;
 }
 
+// ---------- EXPLORER MODULE ----------
+let explorerState = null; // full state object (board, turn, castling, enPassant, ...)
+let explorerMovesPlayed = []; // SAN history for display
+let explorerSelection = { from: null };
+let explorerRequestSeq = 0; // guards against out-of-order async responses overwriting newer ones
+
+function explorerInitialState() {
+  return { board: createInitialBoard(), turn:'w', castling:'KQkq', enPassant:null, halfmove:0, fullmove:1, history: [] };
+}
+
+function resetExplorer() {
+  explorerState = explorerInitialState();
+  explorerMovesPlayed = [];
+  explorerSelection.from = null;
+  renderExplorerBoard();
+  renderExplorerMovesPlayed();
+  refreshExplorerPanels();
+}
+
+function renderExplorerBoard() {
+  const container = document.getElementById('explorerBoardContainer');
+  container.innerHTML = '';
+  Object.assign(container.style, {
+    width:'480px', height:'480px', display:'grid',
+    gridTemplateColumns:'repeat(8,1fr)', gridTemplateRows:'repeat(8,1fr)',
+    border:'3px solid var(--bg-inset)', borderRadius:'4px', overflow:'hidden'
+  });
+
+  for (let displayRow=0; displayRow<8; displayRow++) {
+    for (let displayCol=0; displayCol<8; displayCol++) {
+      const rank = 7-displayRow;
+      const file = displayCol;
+      const piece = explorerState.board[rank][file];
+      const isLight = (rank+file)%2 === 1;
+      const div = document.createElement('div');
+      div.className = 'board-sq selectable ' + (isLight ? 'light':'dark');
+      div.dataset.r = rank;
+      div.dataset.f = file;
+      if (piece) {
+        const glyph = PIECE_GLYPH[piece.color+piece.type] || '';
+        div.innerHTML = `<span class="${piece.color === 'w' ? 'piece-white' : 'piece-black'}">${glyph}</span>`;
+      }
+      if (explorerSelection.from && explorerSelection.from.r===rank && explorerSelection.from.f===file) {
+        div.classList.add('sel-from');
+      }
+      div.addEventListener('click', () => onExplorerSquareClick(rank, file));
+      container.appendChild(div);
+    }
+  }
+
+  document.getElementById('explorerTurnLabel').textContent =
+    explorerState.turn === 'w' ? 'Les Blancs jouent' : 'Les Noirs jouent';
+}
+
+function renderExplorerMovesPlayed() {
+  const el = document.getElementById('explorerMovesPlayed');
+  if (explorerMovesPlayed.length === 0) {
+    el.innerHTML = '<span style="color:var(--text-faint); font-size:12.5px;">Position de départ</span>';
+    return;
+  }
+  let html = '';
+  for (let i=0; i<explorerMovesPlayed.length; i+=2) {
+    const num = (i/2)+1;
+    html += `${num}.${escapeHtml(explorerMovesPlayed[i])} `;
+    if (explorerMovesPlayed[i+1]) html += `${escapeHtml(explorerMovesPlayed[i+1])} `;
+  }
+  el.innerHTML = html;
+}
+
+function onExplorerSquareClick(r, f) {
+  const piece = explorerState.board[r][f];
+
+  if (!explorerSelection.from) {
+    if (!piece || piece.color !== explorerState.turn) return;
+    explorerSelection.from = {r, f};
+    renderExplorerBoard();
+    return;
+  }
+
+  const from = explorerSelection.from;
+  if (from.r === r && from.f === f) {
+    explorerSelection.from = null;
+    renderExplorerBoard();
+    return;
+  }
+
+  const movingPiece = explorerState.board[from.r][from.f];
+  let promotion = null;
+  if (movingPiece && movingPiece.type === 'P' && (r === 0 || r === 7)) {
+    promotion = 'q';
+  }
+
+  const uci = squareToUCI(from.r, from.f) + squareToUCI(r, f) + (promotion || '');
+  explorerSelection.from = null;
+  playExplorerUci(uci);
+}
+
+// Plays a UCI move on the explorer board by converting it to SAN-ish application via applySAN's
+// underlying mechanics — we reuse applySAN by constructing a matching SAN string is overkill,
+// so instead we directly mutate using the same logic as fenAfterUci but keep the full board state
+// (not just FEN) so the explorer can keep rendering pieces.
+function playExplorerUci(uci) {
+  const from = uciToSquare(uci.slice(0,2));
+  const to = uciToSquare(uci.slice(2,4));
+  const promo = uci.length > 4 ? uci[4].toUpperCase() : null;
+
+  const board = cloneBoard(explorerState.board);
+  const piece = board[from.r][from.f];
+  if (!piece) return;
+
+  let castling = explorerState.castling || 'KQkq';
+  if (castling === '-') castling = '';
+  let enPassant = null;
+  let isPawnOrCapture = (piece.type === 'P') || !!board[to.r][to.f];
+
+  function stripCastlingRights(forColor) {
+    if (forColor === 'w') castling = castling.replace(/[KQ]/g,'');
+    else castling = castling.replace(/[kq]/g,'');
+  }
+  function stripRookRight(rank, file) {
+    if (rank===0 && file===0) castling = castling.replace('Q','');
+    if (rank===0 && file===7) castling = castling.replace('K','');
+    if (rank===7 && file===0) castling = castling.replace('q','');
+    if (rank===7 && file===7) castling = castling.replace('k','');
+  }
+
+  // SAN label for display, built before mutating the board
+  const sanLabel = buildSanLabel(explorerState, from, to, piece, promo);
+
+  if (piece.type === 'P' && to.f !== from.f && !board[to.r][to.f]) {
+    board[from.r][to.f] = null;
+    isPawnOrCapture = true;
+  }
+  if (piece.type === 'K' && Math.abs(to.f - from.f) === 2) {
+    const rank = from.r;
+    if (to.f === 6) { board[rank][5] = board[rank][7]; board[rank][7] = null; }
+    if (to.f === 2) { board[rank][3] = board[rank][0]; board[rank][0] = null; }
+  }
+  if (piece.type === 'P' && Math.abs(to.r - from.r) === 2) {
+    enPassant = FILES[from.f] + ((to.r + from.r)/2 + 1);
+  }
+
+  if (piece.type === 'K') stripCastlingRights(piece.color);
+  if (piece.type === 'R') stripRookRight(from.r, from.f);
+  stripRookRight(to.r, to.f);
+
+  board[to.r][to.f] = { type: promo || piece.type, color: piece.color };
+  board[from.r][from.f] = null;
+
+  explorerState = {
+    board,
+    turn: explorerState.turn === 'w' ? 'b' : 'w',
+    castling: castling.length ? castling : '-',
+    enPassant,
+    halfmove: isPawnOrCapture ? 0 : ((explorerState.halfmove||0)+1),
+    fullmove: explorerState.turn === 'b' ? (explorerState.fullmove||1)+1 : (explorerState.fullmove||1)
+  };
+  explorerMovesPlayed.push(sanLabel);
+
+  renderExplorerBoard();
+  renderExplorerMovesPlayed();
+  refreshExplorerPanels();
+}
+
+// Builds a reasonably accurate SAN label for display purposes (check/mate suffixes omitted).
+function buildSanLabel(state, from, to, piece, promo) {
+  const destStr = FILES[to.f] + (to.r+1);
+  if (piece.type === 'K' && Math.abs(to.f - from.f) === 2) {
+    return to.f === 6 ? 'O-O' : 'O-O-O';
+  }
+  const isCapture = !!state.board[to.r][to.f] || (piece.type === 'P' && to.f !== from.f);
+  if (piece.type === 'P') {
+    const promoSuffix = promo ? ('=' + promo) : '';
+    return isCapture ? (FILES[from.f] + 'x' + destStr + promoSuffix) : (destStr + promoSuffix);
+  }
+  const letters = {N:'N', B:'B', R:'R', Q:'Q', K:'K'};
+  return letters[piece.type] + (isCapture ? 'x' : '') + destStr;
+}
+
+document.getElementById('explorerUndoBtn').addEventListener('click', () => {
+  if (explorerMovesPlayed.length === 0) return;
+  const allMoves = [...explorerMovesPlayed];
+  allMoves.pop();
+  explorerMovesPlayed = [];
+  explorerState = explorerInitialState();
+  for (const san of allMoves) {
+    const next = applySAN(explorerState, san);
+    if (next) { explorerState = next; explorerMovesPlayed.push(san); }
+  }
+  explorerSelection.from = null;
+  renderExplorerBoard();
+  renderExplorerMovesPlayed();
+  refreshExplorerPanels();
+});
+
+document.getElementById('explorerResetBtn').addEventListener('click', resetExplorer);
+
+async function refreshExplorerPanels() {
+  const mySeq = ++explorerRequestSeq;
+  const fen = boardToFEN(explorerState);
+
+  // Engine suggestion
+  const engineTextEl = document.getElementById('explorerEngineText');
+  engineTextEl.textContent = 'Analyse en cours…';
+  (async () => {
+    if (!Engine.ready) await Engine.load();
+    if (mySeq !== explorerRequestSeq) return; // a newer move was played meanwhile
+    if (!Engine.ready) {
+      engineTextEl.textContent = "Moteur indisponible — " + document.getElementById('engineStatusText').textContent;
+      return;
+    }
+    const result = await Engine.analyze(fen, 14);
+    if (mySeq !== explorerRequestSeq) return;
+    if (!result || !result.bestmove) {
+      engineTextEl.textContent = "Pas de suggestion pour cette position.";
+      return;
+    }
+    const readable = uciToReadable(explorerState, result.bestmove);
+    let scoreLabel = '';
+    if (result.score) {
+      if (result.score.type === 'mate') {
+        scoreLabel = ` (mat en ${Math.abs(result.score.value)})`;
+      } else {
+        const pawns = (result.score.value/100).toFixed(2);
+        scoreLabel = ` (${pawns > 0 ? '+' : ''}${pawns})`;
+      }
+    }
+    engineTextEl.innerHTML = `Coup suggéré : <strong>${escapeHtml(readable)}</strong>${escapeHtml(scoreLabel)}`;
+  })();
+
+  // Masters database
+  const mastersListEl = document.getElementById('explorerMastersList');
+  mastersListEl.innerHTML = '<p class="explorer-empty">Recherche dans la base des grands maîtres…</p>';
+  try {
+    const url = `https://explorer.lichess.ovh/masters?fen=${encodeURIComponent(fen)}`;
+    const resp = await fetch(url);
+    if (mySeq !== explorerRequestSeq) return;
+    if (!resp.ok) {
+      mastersListEl.innerHTML = `<p class="explorer-empty">La base des grands maîtres n'a pas répondu (code ${resp.status}).</p>`;
+      return;
+    }
+    const data = await resp.json();
+    if (mySeq !== explorerRequestSeq) return;
+    renderExplorerMasters(data);
+  } catch (e) {
+    if (mySeq !== explorerRequestSeq) return;
+    mastersListEl.innerHTML = `<p class="explorer-empty">Impossible de joindre la base des grands maîtres (réseau bloqué ou hors-ligne).</p>`;
+  }
+}
+
+function renderExplorerMasters(data) {
+  const el = document.getElementById('explorerMastersList');
+  if (!data.moves || data.moves.length === 0) {
+    el.innerHTML = '<p class="explorer-empty">Aucune partie de grand maître connue dans cette position exacte.</p>';
+    return;
+  }
+  el.innerHTML = data.moves.map(m => {
+    const total = m.white + m.draws + m.black;
+    const wPct = total ? (m.white/total)*100 : 0;
+    const dPct = total ? (m.draws/total)*100 : 0;
+    const bPct = total ? (m.black/total)*100 : 0;
+    return `
+      <div class="master-move-row" data-uci="${escapeHtml(m.uci)}">
+        <div class="mmr-san">${escapeHtml(m.san)}</div>
+        <div class="mmr-bar-track">
+          <div class="mmr-bar-white" style="width:${wPct}%"></div>
+          <div class="mmr-bar-draw" style="width:${dPct}%"></div>
+          <div class="mmr-bar-black" style="width:${bPct}%"></div>
+        </div>
+        <div class="mmr-total">${total}</div>
+      </div>`;
+  }).join('');
+
+  el.querySelectorAll('.master-move-row').forEach(row => {
+    row.addEventListener('click', () => playExplorerUci(row.dataset.uci));
+  });
+}
+
 // ---------- INIT ----------
 renderJournal();
 populateTrainerThemeFilter();
 renderTrainerGameList();
+resetExplorer();
 </script>
 </body>
 </html>
